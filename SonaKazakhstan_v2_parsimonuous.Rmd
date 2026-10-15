@@ -1,0 +1,1416 @@
+---
+title: "Analysing SONAs in Kazakhstan using STM"
+author: "Nurbek and Ivan"
+date: "04/04/2025"
+output: word_document
+
+---
+
+<style type="text/css">
+body, td {
+   font-size: 6px;
+}
+code.r{ / Code block /
+    font-size: 6px;
+}
+</style>
+
+```{r echo=FALSE}
+setwd("/Users/nurbek.bektursynicloud.com/Desktop/Project")
+#install.packages(c("magrittr", "data.table", 'dplyr', 'ggplot2', 'cluster'))
+sapply(c("magrittr", "data.table", 'plyr','dplyr', 'ggplot2', 'cluster','knitr', 'dendextend','pkgbuild','devtools','R.methodsS3','stm','ngram','matrixStats','corrplot','ggpubr','wordcloud','readxl','tm',"stringr", "ngram"), require, character.only = T)
+
+knitr::opts_chunk$set(fig.width=12, fig.height=16,dpi=500) #10 15
+
+data<-fread("tm_cov_V2.csv")
+pdf("number_addresses.pdf", width = 8, height = 8) 
+data<-cbind(seq(1,length(data$Title)),data)
+colnames(data)<-c("ID","Title","Month","Year","Full_Text","txt_clean","GDP","GDPreal","FDI","Inflation_mom","Inflation_yoy","Unemployment", "Nazarbayev", "Tokayev")
+years <- 1997:2024 
+hist(data$Year, main = "Number of addresses per year", xlab = "year", breaks = 1996:2024, xaxt = 'n')
+axis(side = 1,
+     at = 1996.5:2023.5,  # 27 midpoints
+     labels = years,
+     las = 0)  # horizontal labels
+#since we have multiple SONAs in one year, lets create continuous measure of time
+dev.off()
+data <- data %>%
+  mutate(
+    month_num = match(tolower(Month), tolower(month.name)),   # convert month to number
+    time_continuous = Year + (month_num - 1) / 12             # convert to decimal
+  )
+
+
+
+data$length_title_original<-matrix(0,length(data$Title),1)
+data$length_title_clean<-matrix(0,length(data$Title),1)
+data$length_title_original<-sapply(1:length(data$Title), function(x) wordcount(data$Full_Text[x]))
+data$length_title_clean<-sapply(1:length(data$Title), function(x) wordcount(data$txt_clean[x]))
+
+plot(x=data$length_title_original,y=data$length_title_clean,xlab="length of original text",ylab="Length of cleaned text")
+pdf("length.pdf", width = 8, height = 8) 
+par(mfrow = c(2, 1), mar = c(3.5, 4, 1, 1) + 0.3)              # Additional space for second y-axis
+summary(data$length_title_original)
+hist(data$length_title_original, breaks=30, xlab = "", main="Length of original texts", xaxt = "n")
+axis(1, at = c(0, pretty(data$length_title_original), 18000))
+summary(data$length_title_clean)
+hist(data$length_title_clean, breaks=30, xlab = "# of words", main="Length of cleaned texts", xaxt = "n")
+axis(1, at = c(0, pretty(data$length_title_clean)))
+dev.off()
+par(mfrow = c(2, 2), mar = c(10, 4, 1, 1) + 0.3)              # Additional space for second y-axis
+plot(x=data$time_continuous,y=data$FDI,xlab="Time",ylab="FDI")
+plot(x=data$time_continuous,y=data$GDPreal,xlab="Time",ylab="GDP")
+plot(x=data$time_continuous,y=data$Inflation_yoy,xlab="Time",ylab="Inflation")
+plot(x=data$time_continuous,y=data$Unemployment,xlab="Time",ylab="Unemployment")
+
+
+par(mfrow = c(1, 1), mar = c(10, 4, 1, 1) + 0.3)              # Additional space for second y-axis
+TopicCorrMatrix<-data[,c(8,9,10,11,12,14,15,16,17,18)]
+TopicCorrMatrix1<-cor(TopicCorrMatrix)
+TopicCorrMatrix1<-TopicCorrMatrix1-diag(10)
+colnames(TopicCorrMatrix1)<-colnames(TopicCorrMatrix1)
+rownames(TopicCorrMatrix1)<-colnames(TopicCorrMatrix1)
+testRes = cor.mtest(TopicCorrMatrix, conf.level = 0.95)
+corrplot(TopicCorrMatrix1, p.mat = testRes$p, method = 'circle', insig='blank',col.lim = c(-1, 1),tl.cex=.9,tl.col="black",
+          diag = FALSE,col=colorRampPalette(c("blue","white","red"))(200))$corrPos -> p1
+p1<-p1[which(p1$p.value<0.05),]
+text(p1$x, p1$y, round(p1$corr, 2),cex=.7)
+
+```
+
+Removing 3831 of 6477 terms (5737 of 63057 tokens) due to frequency 
+Your corpus now has 318 documents, 2646 terms and 57320 tokens.
+
+& test STM models for number of topics 3:50 
+```{r, echo=FALSE}
+justloaddata<-1
+
+if(justloaddata==0){
+
+  data$txt_clean<- gsub("[^A-Za-z ]"," ", data$txt_clean)     #keep only english letters basically 
+
+
+
+
+### SPLITTING LONGER TEXTS INTO SHORTER ONES
+  
+data$idl<-seq(1:length(data$ID))
+
+splitSentence <- function(sentence, blockLength) {
+   words <- strsplit(sentence, " ")[[1]]
+   blocks <- c()
+   currentBlock <- ""
+   for (i in 1:length(words)) {
+      word <- words[i]
+      if (wordcount(currentBlock) + wordcount(word) <= blockLength) {
+         currentBlock <- paste(currentBlock, word, sep = " ")
+      } else {
+         blocks <- c(blocks, currentBlock)
+         currentBlock <- word
+      }
+   }
+   if (wordcount(currentBlock) > 0) {
+      blocks <- c(blocks, currentBlock)
+   }
+   return(blocks)
+}
+
+
+#print(result)
+data<-as.data.frame(data)
+
+blockLength <- 300
+data_split<-data
+istr_num<-1
+i_num<-1
+counter<-c()
+for (istr in 1:length(data$idl)){
+  sentence <- data$txt_clean[istr]
+  result <- splitSentence(sentence, blockLength)
+  istr_num<-length(result)
+  
+  data_split[i_num:(i_num+istr_num-1),]<-as.data.frame(lapply(data[istr,], rep, istr_num))
+  # for (iii in i_num:(i_num+istr_num-1)){
+  # data_lemmatized_split[iii,]<-data_lemmatized[istr,]
+  # }
+  data_split$txt_clean[i_num:(i_num+istr_num-1)]<-result
+  i_num<-i_num+istr_num
+  counter<-c(counter, istr_num)
+  print(c(istr,istr_num))
+}
+max(counter)
+
+data_split$length_split<-sapply(1:length(data_split$txt_clean), function(x) wordcount(data_split$txt_clean[x]))
+summary(data_split$length_split)
+hist(data_split$length_split)
+
+
+
+#lets remove company names from the vocabulary
+# company_stopwords<-unique(data_lemmatized$Company.Name)
+# company_stopwords <- gsub("[^A-Za-z ]"," ", company_stopwords) #keep only english letters basically (avoid a and alike) 
+# company_stopwords<-unlist(strsplit(company_stopwords, " "))
+# company_stopwords<-tolower(company_stopwords)
+# company_stopwords<-c(company_stopwords, "company","management","business")
+
+
+library(stm)
+processed <- textProcessor(data_split$txt_clean,
+                           metadata = data_split, lowercase = FALSE,
+                           removestopwords = FALSE, removenumbers = FALSE,
+                           removepunctuation = FALSE, stem = FALSE,
+                           wordLengths = c(3, Inf), sparselevel = 1, language = "en",
+                           #customstopwords =company_stopwords,
+                           verbose = TRUE)
+
+
+#reorganise texts in corpus/vocabulary form removing words that appear in less than3  texts
+out <- prepDocuments(processed$documents, processed$vocab, meta=processed$meta, lower.thresh=3,verbose = TRUE)
+
+vocab_app<-out$vocab
+junk<-out$wordcounts[out$wordcounts>25]
+freq_vocab<-out$wordcounts[out$wordcounts>25]
+#table(unlist(out$documents))
+vocab_app<-vocab_app[order(freq_vocab,decreasing = TRUE)]
+pop_words<-cbind(vocab_app,freq_vocab[order(freq_vocab,decreasing = TRUE)])
+print(length(out$vocab))
+write.csv(pop_words, "pop_words.csv")
+
+#I choose between 3 and 20 topics since our dataset is not so big
+storage<-searchK(out$documents, out$vocab, K = c(3:20),
+                 prevalence =~GDPreal + FDI + Inflation_yoy + Tokayev,
+                 data = out$meta,heldout.seed =59266962,init.type="Spectral",
+                 M=30,#number of keywords per topic to calculate exclusivity
+                 #max.em.its=1000 #max number of iterations per model
+)
+save(out,storage,data,pop_words, data_split, file = "calibration_sona_v2pars_20.RData")
+}
+# Load results
+load("calibration_sona_v2pars_20.RData")
+
+# Choose K
+Kchoice <- 9
+
+
+
+
+pdf("kpi.pdf", width = 8, height = 4) 
+par(mfrow = c(1, 3) ,mar=c(4,4,1,2))
+plot(storage$results$K[1:18], storage$results$heldout[1:18], ylab="Heldout log-likelihood",xlab="",col=ifelse(storage$results$K %in% Kchoice, 'red', 'blue'))
+#axis(1, at=1:length(storage$results$K[1:48]), labels=storage$results$K[1:48])
+plot(storage$results$K[1:18],storage$results$exclus[1:18],  ylab="Exclusivity",xlab="Number of Topics",col=ifelse(storage$results$K %in% Kchoice, 'red', 'blue'))
+#axis(1, at=1:length(storage$results$K[3:50]), labels=storage$results$K[1:48])
+plot(storage$results$K[1:18],storage$results$semcoh[1:18], ylab="Semantic coherence",xlab="",col=ifelse(storage$results$K %in% Kchoice, 'red', 'blue'))
+#axis(1, at=1:length(storage$results$K[3:50]), labels=storage$results$K[1:48])
+dev.off()
+```
+
+
+Here we observe:
+
+ - the figure with topic proportions, i.e. how much text explained by each of the topics;  
+ - the figure with topic summary printing 20 most frequent and exclusive words for each topic;  
+ - summary of each topic with words having  highest probability (most frequent), frequency and exclusivity (FREX), LIFT and SCORE you can ignore as those are rather internal measures without intuitive interpretation;  
+  - 5 representative responses for each topic ("representative" responses are sometimes very heterogeneous, but one should remember  that as we have many topics, most of responses consist of 2-3 topics (even the most representative ones!) so it is important to look on the exclusive words and wordclouds to get a better picture.)
+  
+  
+  Removing 159107 of 215776 terms (213771 of 4062997 tokens) due to frequency 
+Your corpus now has 1477 documents, 56669 terms and 3849226 tokens.
+
+
+```{r, echo=FALSE}
+justloaddata<-1
+
+if(justloaddata==0){
+
+  ncpSelect2 <- selectModel(out$documents, 
+                            out$vocab, 
+                            K = Kchoice,
+                            prevalence =~ GDPreal + FDI + Inflation_yoy + Tokayev,
+                            data = out$meta,
+                            runs=2,
+                            seed =1,
+                            init.type="Spectral",
+                            verbose=TRUE) #, emtol=1) Defaults to .001%.
+  
+  ncpPrevFit_startup <- ncpSelect2$runout[[1]]
+
+  save(ncpPrevFit_startup, file = "sona_v2pars_9.RData")
+}
+load("sona_v2pars_9.RData")
+
+justloaddata<-1
+
+if(justloaddata==0){
+
+processed2 <- textProcessor(data$txt_clean,
+                           metadata = data, lowercase = FALSE,
+                           removestopwords = FALSE, removenumbers = FALSE,
+                           removepunctuation = FALSE, stem = FALSE,
+                           wordLengths = c(3, Inf), sparselevel = 1, 
+                           language = "en",
+                           #customstopwords =company_stopwords,
+                           verbose = TRUE)
+
+out2 <- prepDocuments(processed2$documents, processed2$vocab, meta=processed2$meta, lower.thresh=3,verbose = TRUE)
+
+
+ncpSelect22 <- selectModel(out2$documents, 
+                            out2$vocab, 
+                            K = Kchoice,
+                            prevalence =~ GDPreal + FDI + Inflation_yoy + Tokayev,
+                            data = out2$meta,
+                            runs=2,
+                            seed =1,
+                            init.type="Spectral",
+                            verbose=TRUE) #, emtol=1) Defaults to .001%.
+# 
+
+
+
+ncpPrevFit_startup2 <- ncpSelect22$runout[[1]]
+
+
+# 
+# 
+# weights_aggregated<-matrix(0,1477,Kchoice)
+# for (id in 1:1477){
+#   for (kid in 1:Kchoice){
+#         weights_aggregated[id,kid]<-weighted.mean(ncpPrevFit_startup$theta[which(out$meta$idl==id),kid], w=data_lemmatized_split$length_split[which(out$meta$idl==id)], na.rm = FALSE)
+#       } 
+# }
+# 
+# ncpPrevFit_startup2$theta<-weights_aggregated
+
+  save(processed2,out2,ncpPrevFit_startup2, file = "secondstm_v2pars.RData")
+}
+load("secondstm_v2pars.RData")# Check the four selected models
+
+
+
+#put topic labels here
+tiopiclabel<-as.character(matrix(0,Kchoice,1))
+tiopiclabel[1]<-"T1: Education & Healthcare"
+tiopiclabel[2]<-"T2: Development Strategy"
+tiopiclabel[3]<-"T3: Reforms & Democracy" 
+tiopiclabel[4]<-"T4: Social Welfare"
+tiopiclabel[5]<-"T5: Industrial Development"
+tiopiclabel[6]<-"T6: National Identity"
+tiopiclabel[7]<-"T7: Economic Management"
+tiopiclabel[8]<-"T8: Legislation & Justice"
+tiopiclabel[9]<-"T9: Foreign Affairs"
+# tiopiclabel[13]<-"T10: Affordable housing"
+# tiopiclabel[18]<-"T11: Risk management"
+# tiopiclabel[1]<-"T12: Consumables" 
+# tiopiclabel[29]<-"T13: Asset value"
+# tiopiclabel[14]<-"T14: Electric vehicles"
+# tiopiclabel[32]<-"T15: Firm growth"
+# tiopiclabel[6]<-"T16: Executive compensation"
+# tiopiclabel[25]<-"T17: Natural resources"
+# tiopiclabel[15]<-"T18: Cultural identity"
+# tiopiclabel[2]<-"T19: Profits & taxation"
+# tiopiclabel[12]<-"T20: Renewable energy"
+# tiopiclabel[23]<-"T21: Accreditation"
+# tiopiclabel[19]<-"T22: Healthcare"
+# tiopiclabel[26]<-"T23: Real estate"
+# tiopiclabel[34]<-"T24: Financial disclosure"
+# tiopiclabel[8]<-"T25: Shareholder rights"
+# tiopiclabel[4]<-"T26: Public utilities"
+# tiopiclabel[27]<-"T27: Energy sources"
+# tiopiclabel[9]<-"T28: Subsidies & environment"
+# tiopiclabel[16]<-"T29: Telecommunication"
+# tiopiclabel[5]<-"T30: Aquaculture"
+# tiopiclabel[20]<-"T31: Retail"
+# tiopiclabel[11]<-"T32: Legal proceedings"
+# tiopiclabel[3]<-"T33: Financial risks"
+# tiopiclabel[7]<-"T34: Insurance"
+# # tiopiclabel[35]<-"T35: "
+# # tiopiclabel[36]<-"T36: "
+# # tiopiclabel[37]<-"T37: " 
+# # tiopiclabel[38]<-"T38: "
+
+
+weights_aggregated<-matrix(0,length(data$ID),Kchoice)
+for (id in 1:length(data$ID)){
+  for (kid in 1:Kchoice){
+        weights_aggregated[id,kid]<-weighted.mean(ncpPrevFit_startup$theta[which(out$meta$idl==id),kid], w=data_split$length_split[which(out$meta$idl==id)], na.rm = FALSE)
+      } 
+}
+
+ncpPrevFit_startup$theta<-weights_aggregated
+
+Korder<-1:Kchoice#c(sort(colSums(ncpPrevFit_startup$theta)/sum(ncpPrevFit_startup$theta), index.return=TRUE,decreasing = TRUE)$ix)
+
+aggregated_topic_weights<-colSums(weights_aggregated)/sum(weights_aggregated)
+aggregated_topic_weights[Korder]
+
+#ncpPrevFit_startup <- ncpSelect2$runout[[1]]
+
+
+#unique(data_lemmatized_split$id)
+
+plot(ncpPrevFit_startup, type="summary", main="")
+
+
+
+
+# par(mfrow = c(1, 1) ,mar=c(5,12,1,4))
+# barplot(rev(aggregated_topic_weights[Korder]), names.arg = rev(tiopiclabel[Korder]), main="",horiz=TRUE,las=2,cex.names=0.6,)
+par(mfrow = c(1, 1), cex=1.5)
+plot(ncpPrevFit_startup, type="labels", labeltype="frex",text.cex = .4,n=10)
+
+
+
+labelTopics(ncpPrevFit_startup, topics=Korder, n=30)
+
+# ncpPrevFit_startup$theta[which(out$meta$Titles=="A system dynamics based market agent model simulating future powertrain technology transition: Scenarios in the EU light duty vehicle road transport sector"),]
+
+table<-cbind(out2$meta,weights_aggregated[,Korder])
+colnames(table)[20:28]<-tiopiclabel[Korder]
+
+# write.table(table[,-c(25,28)], file = "table_Mateo.txt", sep = "\t", row.names = FALSE)
+# write.csv(table[,-c(25,28)], "table_Mateo.csv", row.names = FALSE)
+# #write.csv(data, "data_translated.csv", row.names = FALSE)
+```   
+
+
+
+
+```{r, echo=FALSE}
+
+# for (topic_i in 1){
+#   for (thought_i in 1:20){
+#     c<-vocab[docs[findThoughts(ncpPrevFit_climpolicy, texts=meta$Text.CarbonTaxPolicy, n=20,topics=topic_i)$index[[1]]][[thought_i]][1,]]
+#     print(c)
+#   }
+# }
+
+
+# Table 2: responses that are highly associated with topics
+nk<-3
+for (ci in Korder){
+  cii<-ci+1
+  thoughts1<-findThoughts(ncpPrevFit_startup, texts=out2$meta$Title, n=nk, topics=ci)$docs[[1]]
+  thoughts2<-findThoughts(ncpPrevFit_startup, texts=out2$meta$Year, n=nk, topics=ci)$docs[[1]]
+   thoughts3<-findThoughts(ncpPrevFit_startup, texts=out2$meta$Month, n=nk, topics=ci)$docs[[1]]
+  thoughts4<-findThoughts(ncpPrevFit_startup, texts=out2$meta$Tokayev, n=nk, topics=ci)$docs[[1]]
+
+topic_proportions<-as.matrix(make.dt(ncpPrevFit_startup))[findThoughts(ncpPrevFit_startup, texts=out2$meta$txt_clean, n=nk,topics=ci)$index[[1]],cii]
+  
+  message("3 illustrative ESG reports with high prevalence together with the values of those prevalences and words being   analyzed (i.e. excluding rare words dropped out from analysis) of Topic :")
+  print(tiopiclabel[ci])
+    print(cbind(thoughts1[1:nk],thoughts2[1:nk],thoughts3[1:nk],thoughts4[1:nk],topic_proportions))
+
+}
+```
+
+
+
+
+```{r, echo=FALSE}
+logbeta<-ncpPrevFit_startup$beta$logbeta[[1]]
+word_prob<-exp(logbeta)
+word_attribute<-sapply(1:dim(word_prob)[2], function(y) which(word_prob[,y]==max(word_prob[,y])))
+#print(out$vocab)
+ 
+
+
+logbeta <- ncpPrevFit_startup$beta$logbeta[[1]]
+wordcounts <- ncpPrevFit_startup$dim$wcounts$x
+frexlabels <-calcfrex(logbeta, 0, wordcounts)
+problabels<-apply(logbeta, 1, order, decreasing=TRUE)
+# set.seed(1234)
+# wordcloud(words = out$vocab, freq = problabels[,1],scale=c(3,.1), min.freq = 0,
+#           max.words=20, random.order=FALSE, rot.per=0.5,
+#           colors=frexlabels[,1]) 
+# shadesOfGrey <- colorRampPalette(c("grey0", "grey100"))
+# fiftyGreys <- shadesOfGrey(length(out$vocab))
+nb.cols <- length(out$vocab)
+# threshold<-15
+# mycolors <- c(rep("#FFFFE5",length(out$vocab)-threshold),colorRampPalette(brewer.pal(8, "YlOrBr"))(threshold)) #heat.colors(10) rev(heat.colors(50))
+threshold<-1400
+mycolors <- c(rep("#FFFFE5",length(out$vocab)-threshold),colorRampPalette(rev(heat.colors(100)))(threshold)) #heat.colors(10) rev(heat.colors(50))
+
+pal<-colorRampPalette(c("blue", "red"))
+mycolorsRB<-c(rep("darkblue",length(out$vocab)-threshold),pal(threshold))
+
+vec<-matrix(0,length(out$vocab),Kchoice)
+for (j in 1:Kchoice){
+  jj<-length(out$vocab)
+  for (i in 1:length(out$vocab)){
+    vec[frexlabels[i,j],j]<-jj
+    jj<-jj-1
+  }
+}
+
+par(mfrow = c(7, 5) ,mar=c(1,2,1,1)) 
+add_vector<-colSums(ncpPrevFit_startup$theta)/sum(ncpPrevFit_startup$theta)*9#c(0,0,0,1)
+equal_vector<-matrix(mean(add_vector),Kchoice,1)#c(0,0,0,1)
+
+#vector to normalize fonts between wordclouds
+
+par(mfrow = c(3, 3) ,mar=c(1,2,1,1)) 
+set.seed(1)
+for (ci in Korder){
+cloud(ncpPrevFit_startup, topic = ci, max.words = 100,scale=c(3,.5)*equal_vector[ci],rot.per=0,random.order=FALSE)#,colors=fiftyGreys[frexlabels[,1]])
+title(tiopiclabel[ci])
+}
+
+pdf("wordcloud.pdf", width = 11, height = 11)  
+par(mfrow = c(3, 3) ,mar=c(1,2,1,1))
+set.seed(1)
+for (ci in Korder){
+cloud(ncpPrevFit_startup, topic = ci, max.words = 100,scale=c(3,.5)*equal_vector[ci],colors=mycolors[vec[,ci]],random.order=FALSE, random.color=FALSE, ordered.colors=TRUE,rot.per=0)
+title(tiopiclabel[ci], line = -1)
+box("figure", col="black", lwd = 5)
+}
+dev.off()
+tiopiclabel_wc<-tiopiclabel
+# tiopiclabel_wc[1]<-"T1: Wellness"
+# tiopiclabel_wc[2]<-"T2: Travel & tourism"
+# tiopiclabel_wc[3]<-"T3: Data analytics and AI" # or Machine learning and Artificial intelligence # DS, ML & AI  (Data Science, Machine Learning & Artificial Intelligence)
+# tiopiclabel_wc[4]<-"T4: Graphic design"
+# tiopiclabel_wc[5]<-"T5: Time management"
+# tiopiclabel_wc[6]<-"T6: Healthcare services"
+# tiopiclabel_wc[7]<-"T7: Online education"
+# tiopiclabel_wc[8]<-"T8: Fitness"
+# tiopiclabel_wc[9]<-"T9: Trash (location, \n time of establishment)"
+# tiopiclabel_wc[10]<-"T10: Energy"
+# tiopiclabel_wc[11]<-"T11: Clothes & \n accessories"
+# tiopiclabel_wc[12]<-"T12: Science & technology \n services (t-KIBS)" #t-KIBS
+# tiopiclabel_wc[13]<-"T13: Food & beverages"
+# tiopiclabel_wc[14]<-"T14: Transport & logistics"
+# tiopiclabel_wc[15]<-"T15: Recruitment services"
+# tiopiclabel_wc[16]<-"T16: Supply & distribution"
+# tiopiclabel_wc[17]<-"T17: Social platforms"
+# tiopiclabel_wc[18]<-"T18: Financial transfers \n & cryptocurrency"
+# tiopiclabel_wc[19]<-"T19: Cybersecurity"
+# tiopiclabel_wc[20]<-"T20: Medical devices"
+# tiopiclabel_wc[21]<-"T21: Telecommunication \n devices and services"
+# tiopiclabel_wc[22]<-"T22: Software \n development"
+# tiopiclabel_wc[23]<-"T23: Sustainable \n agriculture"
+# tiopiclabel_wc[24]<-"T24: Investment \n management"
+# tiopiclabel_wc[25]<-"T25: Mobile gaming"
+# tiopiclabel_wc[26]<-"T26: Augmented  & \n Virtual reality"
+# tiopiclabel_wc[27]<-"T27: Manufacturing"
+# tiopiclabel_wc[28]<-"T28: Event management"
+# tiopiclabel_wc[29]<-"T29: Video & animation"
+# tiopiclabel_wc[30]<-"T30: Trash (Location)"
+# tiopiclabel_wc[31]<-"T31: E-commerce"
+# tiopiclabel_wc[32]<-"T32: Online social \n networks"
+# tiopiclabel_wc[33]<-"T33: SEO and online \n marketing services"
+# tiopiclabel_wc[34]<-"T34: Online news \n and blogs"
+# tiopiclabel_wc[35]<-"T35: Pharmaceutics"
+# tiopiclabel_wc[36]<-"T36: Beauty & cosmetics"
+# tiopiclabel_wc[37]<-"T37: Legal & professional \n services (p-KIBS)" #p-KIBS
+# tiopiclabel_wc[38]<-"T38: Parking"
+# 
+# par(mfrow = c(4, 3) ,mar=c(1,2,1,1))
+# set.seed(1)
+# for (ci in 1:Kchoice){
+# cloud(ncpPrevFit_startup, topic = ci, max.words = 30,scale=c(3,.5)*equal_vector[ci]*1.8,colors=mycolors[vec[,ci]],random.order=FALSE, random.color=FALSE, ordered.colors=TRUE,rot.per=0,cex.main=.8)
+# title(tiopiclabel_wc[ci], line = -1)
+# box("figure", col="black", lwd = 2)
+# }
+# 
+# par(mfrow = c(7, 3) ,mar=c(1,2,1,1))
+# set.seed(1)
+# for (ci in 1:Kchoice){
+# cloud(ncpPrevFit_startup, topic = ci, max.words = 30,scale=c(3,.5)*equal_vector[ci]*1.8,colors=mycolorsRB[vec[,ci]],random.order=FALSE, random.color=FALSE, ordered.colors=TRUE,rot.per=0)
+# title(tiopiclabel[ci])
+# box("figure", col="black", lwd = 5)
+# }
+```
+
+```{r, echo=FALSE}
+library(RColorBrewer)
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+set.seed(100)
+col=sample(col_vector, Kchoice)
+
+
+table(data$Year)
+years<-unique(data$Year)
+
+topic_year_share<-matrix(0,length(years),Kchoice)
+year_idd<-1
+for (year_id in years){
+  
+  theta_subset <- ncpPrevFit_startup$theta[which(out2$meta$Year==year_id),]
+   
+  if (is.null(dim(theta_subset))) {
+    # Single row: convert to 1-row matrix
+    topic_year_share[year_idd,] <- ncpPrevFit_startup$theta[which(out2$meta$Year==year_id),]
+   } else{
+  
+topic_year_share[year_idd,]<-colSums(ncpPrevFit_startup$theta[which(out2$meta$Year==year_id),])/sum(ncpPrevFit_startup$theta[which(out2$meta$Year==year_id),])
+}
+  
+year_idd<-year_idd+1
+}
+
+#rowSums(topic_year_share)
+topic_year_share<-as.data.frame(topic_year_share)
+rownames(topic_year_share)<-years
+colnames(topic_year_share)<-tiopiclabel
+pdf("topic_year_share.pdf", width = 8, height = 8)  
+par(mfrow = c(3, 3) ,mar=c(2,2,1,1))
+for(k_i in Korder){
+  matplot(rownames(topic_year_share), topic_year_share[,k_i], type='l', lty=1,lwd=2, xlab='Years', ylab='Share', col=col[k_i],xaxt='n',ylim=c(0,0.7))
+  axis(side=1, at=unique(data$Year), labels=years)
+  fit <- lm(topic_year_share[,k_i] ~ years)
+  pred <- predict(fit, newdata = data.frame(years = years),
+                interval = "confidence", level = 0.95)
+  abline(fit, col = col[k_i], lwd = 1, lty = 1)
+  lines(years, pred[, "lwr"], col = col[k_i], lty = 2)
+  lines(years, pred[, "upr"], col = col[k_i], lty = 2)
+  legend('topright', inset=.05, legend=colnames(topic_year_share)[k_i],pch=3, col=col[k_i])
+}
+dev.off()
+# write.csv(topic_year_share, "topic_year_share.csv")
+
+```
+```{r, echo=FALSE}
+for(k_i in Korder){
+  topic_name <- colnames(topic_year_share)[k_i]
+  cat("\n============================\n")
+  cat("Regression for topic:", topic_name, "\n")
+  cat("============================\n")
+  
+  fit <- lm(topic_year_share[,k_i] ~ years)
+  print(summary(fit))
+}
+```
+
+```{r, echo=FALSE}
+library(RColorBrewer)
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+set.seed(20)
+col=sample(col_vector, Kchoice)
+
+
+# #out$meta<-data
+# #out2$meta<-as.data.frame()
+# out$meta$Year<-as.numeric(out$meta$Year)
+# out$meta$Finance<-as.integer(out$meta$Finance)
+# out$meta$ConsumerGoods<-as.integer(out$meta$ConsumerGoods)
+# out$meta$Digital<-as.integer(out$meta$Digital)
+# out$meta$Resources<-as.integer(out$meta$Resources)
+# out$meta$Industrial<-as.integer(out$meta$Industrial)
+# out$meta$Housing<-as.integer(out$meta$Housing)
+# out$meta$Pharma<-as.integer(out$meta$Pharma)
+
+  prep <- estimateEffect(Korder ~ GDPreal + FDI + Inflation_yoy + Tokayev,
+                       ncpPrevFit_startup,
+                       meta=out$meta,
+                       uncertainty = "Global")
+
+summary(prep)
+
+
+library("Hmisc")
+library(car)
+
+for (it in 1:Kchoice){
+  y<-table[,19+it]
+  model<-lm(y~  GDPreal + FDI + Inflation_yoy + Tokayev #GDPreal + FDI + Inflation_yoy + Tokayev
+            , data=table)
+  print(summary(model))
+  print(vif(model))
+}
+
+
+par(mfrow = c(3, 3) ,mar=c(2,2,2,2))
+
+# 
+# for(k_i in Korder){
+# plot.estimateEffect(prep,
+#                     main="Time",
+#                     covariate = "time_continuous",
+#                     topics = c(k_i),
+#                     model=ncpPrevFit_startup,
+#                     method="continuous",
+#                     labeltype="custom",
+#                     custom.labels=tiopiclabel[k_i],
+#                     ylim=c(0,.5),
+#                     linecol="black",
+#                     ylab="Expected topic prevalence",ci.level=0.95
+# )
+# 
+# }
+
+
+par(mfrow = c(3, 2) ,mar=c(2,2,2,2))
+
+
+for(k_i in Korder[c(1,2,3,5,6,9)]){
+plot.estimateEffect(prep,
+                    main="GDPreal",
+                    covariate = "GDPreal",
+                    topics = Korder[c(1,2,3,5,6,9)],
+                    model=ncpPrevFit_startup,
+                    method="continuous",
+                    labeltype="custom",
+                    custom.labels=tiopiclabel[k_i],
+                    ylim=c(0,.5),
+                    linecol="black",
+                    ylab="Expected topic prevalence",ci.level=0.95
+)
+
+}
+
+
+par(mfrow = c(1, 1) ,mar=c(2,2,2,2))
+
+
+for(k_i in Korder[c(2)]){
+plot.estimateEffect(prep,
+                    main="FDI",
+                    covariate = "FDI",
+                    topics = Korder[c(2)],
+                    model=ncpPrevFit_startup,
+                    method="continuous",
+                    labeltype="custom",
+                    custom.labels=tiopiclabel[k_i],
+                    ylim=c(0,.5),
+                    linecol="black",
+                    ylab="Expected topic prevalence",ci.level=0.95
+)
+
+}
+
+
+par(mfrow = c(1, 1) ,mar=c(2,2,2,2))
+
+
+for(k_i in Korder[c(2,6)]){
+plot.estimateEffect(prep,
+                    main="Inflation",
+                    covariate = "Inflation_yoy",
+                    topics = Korder[c(2,6)],
+                    model=ncpPrevFit_startup,
+                    method="continuous",
+                    labeltype="custom",
+                    custom.labels=tiopiclabel[k_i],
+                    ylim=c(0,.5),
+                    linecol="black",
+                    ylab="Expected topic prevalence",ci.level=0.95
+)
+
+}
+
+
+
+par(mfrow = c(3, 3) ,mar=c(2,2,2,2))
+
+# 
+# for(k_i in Korder){
+# plot.estimateEffect(prep,
+#                     main="Unemployment",
+#                     covariate = "Unemployment",
+#                     topics = c(k_i),
+#                     model=ncpPrevFit_startup,
+#                     method="continuous",
+#                     labeltype="custom",
+#                     custom.labels=tiopiclabel[k_i],
+#                     ylim=c(0,.5),
+#                     linecol="black",
+#                     ylab="Expected topic prevalence",ci.level=0.95
+# )
+# 
+# }
+
+plot.estimateEffect(prep,
+                    main="Tokayev",
+                    covariate = "Tokayev",
+                    topics = Korder,
+                    model=ncpPrevFit_startup,
+                    method="difference",
+                    labeltype="custom",
+                    custom.labels=tiopiclabel[Korder],
+                    cov.value1 = 1,cov.value2 = 0,
+                    xlim=c(-.7,.4),
+                    linecol=col[Korder],
+                    xlab="",ci.level=0.95
+)
+
+# 
+# par(mfrow = c(4,2) ,mar=c(2,2,2,2))
+# 
+# plot.estimateEffect(prep,
+#                     main="GDPreal",
+#                     covariate = "GDPreal",
+#                     topics = Korder[c(5,11,18,17,23,27,30,32,33)],
+#                     model=ncpPrevFit_startup,
+#                     method="difference",
+#                     labeltype="custom",
+#                     custom.labels=tiopiclabel[Korder[c(5,11,18,17,23,27,30,32,33)]],
+#                     cov.value1 = 1,cov.value2 = 0,
+#                     xlim=c(-1,.4),
+#                     linecol=col[Korder[c(5,11,18,17,23,27,30,32,33)]],
+#                     xlab="",ci.level=0.95
+# )
+# 
+# plot.estimateEffect(prep,
+#                     main="Consumer Goods",
+#                     covariate = "ConsumerGoods",
+#                     topics = Korder[c(4,5,8,12,17,24,27,30)],
+#                     model=ncpPrevFit_startup2,
+#                     method="difference",
+#                     labeltype="custom",
+#                     custom.labels=tiopiclabel[Korder[c(4,5,8,12,17,24,27,30)]],
+#                     cov.value1 = 1,cov.value2 = 0,
+#                     xlim=c(-1,.4),
+#                     linecol=col[Korder[c(4,5,8,12,17,24,27,30)]],
+#                     xlab="",ci.level=0.95
+# )
+# 
+# plot.estimateEffect(prep,
+#                     main="Digital",
+#                     covariate = "Digital",
+#                     topics = Korder[c(5,14,15,17,25,27,29,30)],
+#                     model=ncpPrevFit_startup2,
+#                     method="difference",
+#                     labeltype="custom",
+#                     custom.labels=tiopiclabel[Korder[c(5,14,15,17,25,27,29,30)]],
+#                     cov.value1 = 1,cov.value2 = 0,
+#                     xlim=c(-1,.4),
+#                     linecol=col[Korder[c(5,14,15,17,25,27,29,30)]],
+#                     xlab="",ci.level=0.95
+# )
+# 
+# plot.estimateEffect(prep,
+#                     main="Resources",
+#                     covariate = "Resources",
+#                     topics = Korder[c(1,13,17)],
+#                     model=ncpPrevFit_startup2,
+#                     method="difference",
+#                     labeltype="custom",
+#                     custom.labels=tiopiclabel[Korder[c(1,13,17)]],
+#                     cov.value1 = 1,cov.value2 = 0,
+#                     xlim=c(-1,.4),
+#                     linecol=col[Korder[c(1,13,17)]],
+#                     xlab="",ci.level=0.95
+# )
+# 
+# plot.estimateEffect(prep,
+#                     main="Industrial",
+#                     covariate = "Industrial",
+#                     topics = Korder[c(1,2,8,9,13,14,15,17,24,27)],
+#                     model=ncpPrevFit_startup2,
+#                     method="difference",
+#                     labeltype="custom",
+#                     custom.labels=tiopiclabel[Korder[c(1,2,8,9,13,14,15,17,24,27)]],
+#                     cov.value1 = 1,cov.value2 = 0,
+#                     xlim=c(-1,.4),
+#                     linecol=col[Korder[c(1,2,8,9,13,14,15,17,24,27)]],
+#                     xlab="",ci.level=0.95
+# )
+# 
+# plot.estimateEffect(prep,
+#                     main="Housing",
+#                     covariate = "Housing",
+#                     topics = Korder[c(4,10,17,20,26)],
+#                     model=ncpPrevFit_startup2,
+#                     method="difference",
+#                     labeltype="custom",
+#                     custom.labels=tiopiclabel[Korder[c(4,10,17,20,26)]],
+#                     cov.value1 = 1,cov.value2 = 0,
+#                     xlim=c(-1,.4),
+#                     linecol=col[Korder[c(4,10,17,20,26)]],
+#                     xlab="",ci.level=0.95
+# )
+# 
+# plot.estimateEffect(prep,
+#                     main="Pharma",
+#                     covariate = "Pharma",
+#                     topics = Korder[c(4,22)],
+#                     model=ncpPrevFit_startup2,
+#                     method="difference",
+#                     labeltype="custom",
+#                     custom.labels=tiopiclabel[Korder[c(4,22)]],
+#                     cov.value1 = 1,cov.value2 = 0,
+#                     xlim=c(-1,.4),
+#                     linecol=col[Korder[c(4,22)]],
+#                     xlab="",ci.level=0.95
+# )
+```
+```{r, echo=FALSE}
+pdf("cov_plots.pdf", width = 7, height = 7)  
+# Set margins
+par(mfrow = c(3, 3) ,mar=c(2,2,2,2)) 
+# 1. GDP Real plots
+for(k_i in Korder[c(1,2,3,5,6,9)]){
+  par(cex.main = 1.2)
+  plot.estimateEffect(prep,
+                      main = "GDPreal",
+                      covariate = "GDPreal",
+                      topics = k_i,
+                      model = ncpPrevFit_startup,
+                      method = "continuous",
+                      labeltype = "custom",
+                      custom.labels = tiopiclabel[k_i],
+                      ylim = c(0, .5),
+                      linecol = "black",
+                      ylab = "Expected topic prevalence",
+                      ci.level = 0.95)
+}
+
+# 2. FDI plot
+for(k_i in Korder[c(2)]){
+  par(cex.main = 1.2)
+  plot.estimateEffect(prep,
+                      main = "FDI",
+                      covariate = "FDI",
+                      topics = k_i,
+                      model = ncpPrevFit_startup,
+                      method = "continuous",
+                      labeltype = "custom",
+                      custom.labels = tiopiclabel[k_i],
+                      ylim = c(0, .5),
+                      linecol = "black",
+                      ylab = "Expected topic prevalence",
+                      ci.level = 0.95)
+}
+
+# 3. Inflation plots
+for(k_i in Korder[c(2,6)]){
+  par(cex.main = 1.2)
+  plot.estimateEffect(prep,
+                      main = "Inflation",
+                      covariate = "Inflation_yoy",
+                      topics = k_i,
+                      model = ncpPrevFit_startup,
+                      method = "continuous",
+                      labeltype = "custom",
+                      custom.labels = tiopiclabel[k_i],
+                      ylim = c(0, .5),
+                      linecol = "black",
+                      ylab = "Expected topic prevalence",
+                      ci.level = 0.95)
+}
+dev.off()
+```
+```{r, echo=FALSE}
+pdf("cov_plot_Tokayev.pdf", width = 8, height = 8) 
+plot.estimateEffect(prep,
+                    main="Tokayev",
+                    covariate = "Tokayev",
+                    topics = Korder,
+                    model=ncpPrevFit_startup,
+                    method="difference",
+                    labeltype="custom",
+                    custom.labels=tiopiclabel[Korder],
+                    cov.value1 = 1,cov.value2 = 0,
+                    xlim=c(-.7,.4),
+                    linecol=col[Korder],
+                    xlab="",ci.level=0.95
+)
+dev.off()
+```
+
+```{r, echo=FALSE}
+pdf("corr_plot.pdf", width = 8, height = 8) 
+data_sentiment<-fread("Topic_prop_v3.5.csv")
+X_vars <- data_sentiment[, c(18, 19, 20, 21, 22, 23, 24, 25, 26)] 
+Y_vars <- data_sentiment[, c(27, 28, 29)] 
+TopicCorrMatrix1 <- cor(X_vars, Y_vars)
+rownames(TopicCorrMatrix1) <- colnames(X_vars)
+colnames(TopicCorrMatrix1) <- colnames(Y_vars)
+cor.mtest <- function(mat1, mat2){
+  mat1 <- as.data.frame(mat1)
+  mat2 <- as.data.frame(mat2)
+  
+  n1 <- ncol(mat1)
+  n2 <- ncol(mat2)
+  
+  corr.mat <- matrix(NA, nrow = n1, ncol = n2)  # correlation values
+  p.mat <- matrix(NA, nrow = n1, ncol = n2)     # p-values
+  
+  for(i in 1:n1){
+    for(j in 1:n2){
+      ans <- cor.test(mat1[[i]], mat2[[j]])
+      corr.mat[i, j] <- ans$estimate   # correlation coefficient
+      p.mat[i, j] <- ans$p.value       # p-value
+    }
+  }
+  
+  rownames(corr.mat) <- colnames(mat1)
+  colnames(corr.mat) <- colnames(mat2)
+  rownames(p.mat) <- colnames(mat1)
+  colnames(p.mat) <- colnames(mat2)
+  
+  return(list(cor = corr.mat, p = p.mat))
+}
+result1 <- cor.mtest(X_vars, Y_vars)
+
+corrplot(result1$cor, 
+         is.corr = FALSE, 
+         method = "square",
+         tl.cex = 1.2,
+         tl.col = "black",
+         col.lim = c(-1, 1),
+         cl.ratio = 0.9,
+         col = colorRampPalette(c("blue", "white", "red"))(200),
+         p.mat = result1$p,
+         insig = "label_sig",
+         sig.level = c(.01, .05, .10),
+         pch.cex = 0.9,
+         pch.col = "white")
+dev.off()
+```
+```{r, echo=FALSE}
+pdf("corr_plot2.pdf", width = 4, height = 5) 
+X_vars_2 <- data_sentiment[, c(6, 7, 9, 10)] 
+Y_vars <- data_sentiment[, c(27, 28, 29)] 
+TopicCorrMatrix1 <- cor(X_vars_2, Y_vars)
+rownames(TopicCorrMatrix1) <- colnames(X_vars_2)
+colnames(TopicCorrMatrix1) <- colnames(Y_vars)
+cor.mtest <- function(mat1, mat2){
+  mat1 <- as.data.frame(mat1)
+  mat2 <- as.data.frame(mat2)
+  
+  n1 <- ncol(mat1)
+  n2 <- ncol(mat2)
+  
+  corr.mat <- matrix(NA, nrow = n1, ncol = n2)  # correlation values
+  p.mat <- matrix(NA, nrow = n1, ncol = n2)     # p-values
+  
+  for(i in 1:n1){
+    for(j in 1:n2){
+      ans <- cor.test(mat1[[i]], mat2[[j]])
+      corr.mat[i, j] <- ans$estimate   # correlation coefficient
+      p.mat[i, j] <- ans$p.value       # p-value
+    }
+  }
+  
+  rownames(corr.mat) <- colnames(mat1)
+  colnames(corr.mat) <- colnames(mat2)
+  rownames(p.mat) <- colnames(mat1)
+  colnames(p.mat) <- colnames(mat2)
+  
+  return(list(cor = corr.mat, p = p.mat))
+}
+result2 <- cor.mtest(X_vars_2, Y_vars)
+
+corrplot(result2$cor, 
+         is.corr = FALSE, 
+         method = "square",
+         tl.cex = 1.2,
+         tl.col = "black",
+         col.lim = c(-1, 1),
+         cl.ratio = 0.9,
+         col = colorRampPalette(c("blue", "white", "red"))(200),
+         p.mat = result2$p,
+         insig = "label_sig",
+         sig.level = c(.01, .05, .10),
+         pch.cex = 0.9,
+         pch.col = "white")
+dev.off()
+```
+```{r, echo=FALSE}
+pdf("corr_plot_combined.pdf", width = 8, height = 8) 
+par(mfrow=c(1,2))
+# First correlation plot
+plot1 <- corrplot(result1$cor,
+         is.corr = FALSE,
+         method = "square",
+         tl.cex = 1.2,
+         tl.col = "black",
+         col.lim = c(-1, 1),
+         cl.ratio = 0.9,
+         col = colorRampPalette(c("blue", "white", "red"))(200),
+         p.mat = result1$p,
+         insig = "label_sig",
+         sig.level = c(.01, .05, .10),
+         pch.cex = 0.9,
+         pch.col = "white")
+
+# Second correlation plot
+plot2 <- corrplot(result2$cor,
+         is.corr = FALSE,
+         method = "square",
+         tl.cex = 1.2,
+         tl.col = "black",
+         col.lim = c(-1, 1),
+         cl.ratio = 0.9,
+         col = colorRampPalette(c("blue", "white", "red"))(200),
+         p.mat = result2$p,
+         insig = "label_sig",
+         sig.level = c(.01, .05, .10),
+         pch.cex = 0.9,
+         pch.col = "white")
+dev.off()
+```
+
+```{r, echo=FALSE}
+
+# #limit the data to the period 2019-2022
+# years_eligible<-c(2019,2020,2021,2022,2023)
+# data_lemmatized_clustering<-data_lemmatized[which(data_lemmatized$year %in% years_eligible),]
+# #hist(table(data_lemmatized$Company.Name))
+# junk<-table(data_lemmatized_clustering$Company.Name)>=3
+# List_companies<-sort(unique(data_lemmatized_clustering$Company.Name))
+# List_companies<-List_companies[junk]
+# #247 companies
+# 
+# data_clust<-matrix(0,length(unique(List_companies)),6+1)
+# data_clust<-as.data.frame(data_clust)
+# data_clust[,1]<-List_companies
+# 
+# ii<-1
+# for (j in c(3,8,14,20,27,28)){
+#   for (i in List_companies){
+#   data_clust[which(data_clust[,1]==i),(1+ii)]<-mean(ncpPrevFit_startup$theta[which(data_lemmatized$Company.Name==i & data_lemmatized$Year %in% years_eligible),Korder[j]])
+#   
+# }
+#   ii<-ii+1
+# }
+# rownames(data_clust)<-List_companies
+# 
+# 
+# clust_dist <- dist(data_clust[,2:(6+1)], method='euclidian')
+# hier_clust <- hclust(clust_dist, method='complete')
+# 
+# library(stats)
+# plot(as.dendrogram(hier_clust),cex = 0.2)
+# dend_col <- color_branches(hier_clust, k=6,col=c( "lightgreen","blueviolet","blue",  "red","darkgreen","magenta") )
+# plot(dend_col, cex = 0.1)
+# # plot(dend_col)
+# # dend_labels <- labels(dend_col)
+# # text(x = 1:length(dend_labels), labels = dend_labels, srt = 45, adj = c(1,1), xpd = T)
+# 
+# par(cex=0.3, mar=c(5,4,4,8) + 0.1)
+# 
+# plot(dend_col, cex = 0.05,horiz=TRUE)
+# 
+# library("ape")
+# 
+# # plot(as.phylo(dend_col), type = "fan")
+# 
+# par(cex=0.7, mar=c(5,4,4,8) + 0.1)
+# colors = c( "magenta","red","blueviolet", "darkgreen","blue", "lightgreen")
+# clus6 = cutree(dend_col, 6)
+# plot(as.phylo(dend_col), type = "fan", tip.color = colors[clus6])
+# 
+# 
+# groups <- cutree(hier_clust, h = 0.38)
+# 
+# table(groups)
+# groups[groups==1]
+# groups[groups==2]
+# groups[groups==3]
+# groups[groups==4]
+# groups[groups==5]
+# groups[groups==6]
+# # groups[groups==7]
+# # groups[groups==8]
+# 
+# 
+# 
+# groups[which(groups==6)]<-11
+# groups[which(groups==3)]<-12
+# groups[which(groups==5)]<-13
+# groups[which(groups==2)]<-14
+# groups[which(groups==4)]<-15
+# groups[which(groups==1)]<-16
+# 
+# groups[groups==11]
+# groups[groups==12]
+# groups[groups==13]
+# groups[groups==14]
+# groups[groups==15]
+# groups[groups==16]
+# 
+# table(groups)
+# 
+# 
+# 
+# data_clust$cluster<-groups
+# 
+# data_clustering2<-matrix(0,6,1+6)
+# data_clustering2<-as.data.frame(data_clustering2)
+# colnames(data_clustering2)<-c("Cluster","T3","T8","T14","T20","T27", "T28")
+# 
+# data_clustering2[,1]<-c('C1','C2', "C3","C4","C5", "C6")
+# for (clusti in 2:7){
+# for (groupsi in 11:16){
+#   data_clustering2[(groupsi-10),clusti]<-mean(data_clust[which(data_clust$cluster==groupsi),(clusti)])
+# 
+# }
+#   }
+#   
+# rownames(data_clustering2)<-c('C1','C2', "C3","C4","C5", "C6")
+# 
+# 
+# g1<-ggplot(data = data_clustering2, aes(x = Cluster, y = T3))+ 
+#   # geom_errorbar(aes(ymin = mean-2*se, ymax = mean+2*se, color = Question),
+#   #               position= position_dodge(0.5), width = 0.2) +
+#   geom_point(position = position_dodge(0.5)) +
+#   labs(x = "", y = tiopiclabel[Korder[3]])+
+#   theme(axis.text.x = element_text(size = 6, angle = 55, hjust = 1))+
+#   theme(axis.title.y = element_text(size = 6))+
+# geom_hline(yintercept=mean(data_clust$V2), linetype="dashed", color = "black")+ theme(legend.position="bottom")+
+#   ylim(0,  max(data_clustering2$T3))#+
+# 
+# g2<-ggplot(data = data_clustering2, aes(x = Cluster, y = T8))+ 
+#   # geom_errorbar(aes(ymin = mean-2*se, ymax = mean+2*se, color = Question),
+#   #               position= position_dodge(0.5), width = 0.2) +
+#   geom_point(position = position_dodge(0.5)) +
+#   labs(x = "", y = tiopiclabel[Korder[8]])+
+#   theme(axis.text.x = element_text(size = 6, angle = 55, hjust = 1))+   theme(axis.title.y = element_text(size = 6))+
+# geom_hline(yintercept=mean(data_clust$V3), linetype="dashed", color = "black")+ theme(legend.position="bottom")+
+#   ylim(0,  max(data_clustering2$T8))#+
+# 
+# g3<-ggplot(data = data_clustering2, aes(x = Cluster, y = T14))+ 
+#   # geom_errorbar(aes(ymin = mean-2*se, ymax = mean+2*se, color = Question),
+#   #               position= position_dodge(0.5), width = 0.2) +
+#   geom_point(position = position_dodge(0.5)) +
+#   labs(x = "", y = tiopiclabel[Korder[14]])+
+#   theme(axis.text.x = element_text(size = 6, angle = 55, hjust = 1))+   theme(axis.title.y = element_text(size = 6))+
+# geom_hline(yintercept=mean(data_clust$V4), linetype="dashed", color = "black")+ theme(legend.position="bottom")+
+#   ylim(0,  max(data_clustering2$T14))#+
+# 
+# 
+# 
+# g4<-ggplot(data = data_clustering2, aes(x = Cluster, y = T20))+ 
+#   # geom_errorbar(aes(ymin = mean-2*se, ymax = mean+2*se, color = Question),
+#   #               position= position_dodge(0.5), width = 0.2) +
+#   geom_point(position = position_dodge(0.5)) +
+#   labs(x = "", y = tiopiclabel[Korder[20]])+
+#   theme(axis.text.x = element_text(size = 6, angle = 55, hjust = 1))+   theme(axis.title.y = element_text(size = 6))+
+# geom_hline(yintercept=mean(data_clust$V5), linetype="dashed", color = "black")+ theme(legend.position="bottom")+
+#   ylim(0,  max(data_clustering2$T20))#+
+# 
+# g5<-ggplot(data = data_clustering2, aes(x = Cluster, y = T27))+ 
+#   # geom_errorbar(aes(ymin = mean-2*se, ymax = mean+2*se, color = Question),
+#   #               position= position_dodge(0.5), width = 0.2) +
+#   geom_point(position = position_dodge(0.5)) +
+#   labs(x = "", y = tiopiclabel[Korder[27]])+
+#   theme(axis.text.x = element_text(size = 6, angle = 55, hjust = 1))+   theme(axis.title.y = element_text(size = 6))+
+# geom_hline(yintercept=mean(data_clust$V6), linetype="dashed", color = "black")+ theme(legend.position="bottom")+
+#   ylim(0,  max(data_clustering2$T27))#+
+# 
+# 
+# g6<-ggplot(data = data_clustering2, aes(x = Cluster, y = T28))+ 
+#   # geom_errorbar(aes(ymin = mean-2*se, ymax = mean+2*se, color = Question),
+#   #               position= position_dodge(0.5), width = 0.2) +
+#   geom_point(position = position_dodge(0.5)) +
+#   labs(x = "", y = tiopiclabel[Korder[28]])+
+#   theme(axis.text.x = element_text(size = 6, angle = 55, hjust = 1))+   theme(axis.title.y = element_text(size = 6))+
+# geom_hline(yintercept=mean(data_clust$V7), linetype="dashed", color = "black")+ theme(legend.position="bottom")+
+#   ylim(0,  max(data_clustering2$T28))#+
+# 
+# 
+# library(gridExtra)
+# library(grid)
+# grid.arrange(g1, g2, g3, g4,g5,g6, nrow = 3)
+# #write.csv(data_clustering2, "data_clustering2.csv",sep = ";",row.names = FALSE,fileEncoding = "UTF-8")
+# 
+
+```
+
+Regressions
+```{r, echo=FALSE}
+# 
+# data_regression<-fread("table_regression_csv.csv")
+# 
+# 
+# table_corr2<-data_regression[,c(16,20,21,22,25,48:81)]
+# summary(table_corr2)
+# colnames(table_corr2)<-c("CO2 to revenues","ESG score", "Emmisions Score","E Innovation Score", "Energy to revenues",tiopiclabel[Korder])
+# 
+# base<-na.omit(table_corr2)
+# L = cor(base)
+# #summary(base)
+# testRes = cor.mtest(base, conf.level = 0.95)
+# corrplot(L[c(1:5),c(6:39)], p.mat = testRes$p[c(1:5),c(6:39)],  method = "circle", insig='blank',
+#          #order = "hclust",
+#          diag = FALSE,
+#          number.cex = 0.35,
+#          cl.lim=c(-1,1),
+#          addCoef.col = "black", # Add coefficient of correlation
+#          tl.col = "black", tl.srt = 90,col=colorRampPalette(c("blue","white","red"))(200))$corrPos -> p1
+# p1<-p1[which(p1$p.value<0.05),]
+# text(p1$x, p1$y, round(p1$corr, 2),cex=.5)
+# 
+# 
+# table_corr3<-data_regression[,c(26,30,31,32,35,82:115)]
+# summary(table_corr3)
+# colnames(table_corr3)<-c("CO2_to_revenues_diff","ESG_score_diff", "Emmisions_Score_diff","E_Innovation_Score_diff", "Energy_to_revenues_diff",tiopiclabel[Korder])
+# 
+# 
+# base<-na.omit(table_corr3)
+# L = cor(base)
+# #summary(base)
+# testRes = cor.mtest(base, conf.level = 0.95)
+# corrplot(L[c(1:5),c(6:39)], p.mat = testRes$p[c(1:5),c(6:39)],  method = "circle", insig='blank',
+#          #order = "hclust",
+#          diag = FALSE,
+#          number.cex = 0.35,
+#          cl.lim=c(-1,1),
+#          addCoef.col = "black", # Add coefficient of correlation
+#          tl.col = "black", tl.srt = 90,col=colorRampPalette(c("blue","white","red"))(200))$corrPos -> p1
+# p1<-p1[which(p1$p.value<0.05),]
+# text(p1$x, p1$y, round(p1$corr, 2),cex=.5)
+# 
+# 
+# table_corr<-data_regression[,c(6,8,12,16,20,21,22,25,26,30:32,35,48:115)]
+# 
+# colnames(table_corr)[1:13]<-c("company", "Year","Sector","CO2_to_revenues",
+# "ESG_Score", "Emmissions_Score","E_Innovation_Score", "Energy_to_revenues",
+# "CO2_to_revenues_diff","ESG_Score_diff", "Emmissions_Score_diff","E_Innovation_Score_diff", "Energy_to_revenues_diff")
+# 
+# 
+# # 
+# # table_corr$Finance<-matrix(0,length(table_corr$Sector),1)
+# # table_corr$ConsumerGoods<-matrix(0,length(table_corr$Sector),1)
+# # table_corr$Digital<-matrix(0,length(table_corr$Sector),1)
+# # table_corr$Resources<-matrix(0,length(table_corr$Sector),1)
+# # table_corr$Industrial<-matrix(0,length(table_corr$Sector),1)
+# # table_corr$Housing<-matrix(0,length(table_corr$Sector),1)
+# # table_corr$Pharma<-matrix(0,length(table_corr$Sector),1)
+# # 
+# # table_corr$Finance[which(table_corr$Sector %in% c("Financial Services","Insurance"))]<-1
+# # table_corr$ConsumerGoods[which(table_corr$Sector %in% c("Retail","Food & Beverage","Personal & Household Goods","Clothing & Footwear"))]<-1
+# # table_corr$Digital[which(table_corr$Sector %in% c("IT & Telecommunication Services","Software & IT Services","Media & Entertainment","Electronics"))]<-1
+# # table_corr$Resources[which(table_corr$Sector %in% c("Basic Materials & Mining","Energy Production & Gas, Fuels & Biofuels","Metals & Glass","Forestry & Agriculture"))]<-1
+# # table_corr$Industrial[which(table_corr$Sector %in% c("Automobiles & Other Transport Vehicles","Industrial Goods & Services","Heavy Machinery","Industrial Machinery","Transportation & Logistics"))]<-1
+# # table_corr$Housing[which(table_corr$Sector %in% c("Real Estate & Hotels","Water, Electricity & Heating","Building & Construction"))]<-1
+# # table_corr$Pharma[which(table_corr$Sector %in% c("Medical Equipment & Technology","Biotechnology & Pharmaceuticals","Personal Products & Health Care"))]<-1
+# 
+# 
+# 
+# library("plm")
+# library("pglm")
+# reg1 <-plm(CO2_to_revenues ~ T3 + T8 + T14 + T20 +T27 + T28, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# reg2 <-plm(ESG_Score ~ T3 + T8 + T14 + T20 +T27+ T28, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# reg3 <-plm(Emmissions_Score ~ T3 + T8 + T14 + T20 +T27+ T28, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# 
+# reg4 <-plm(E_Innovation_Score ~ T3 + T8 + T14 + T20 +T27+ T28, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# 
+# reg5 <-plm(Energy_to_revenues ~ T3 + T8 + T14 + T20 +T27+ T28, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# library(stargazer)
+# stargazer(reg1, reg5, omit = '[i][n][d]', type='text')
+# 
+# stargazer(reg2, reg3, reg4, omit = '[i][n][d]', type='text')
+# 
+# ###differences
+# reg1 <-plm(CO2_to_revenues_diff ~ T3 + T8 + T14 + T20 +T27+ T28, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# reg2 <-plm(ESG_Score_diff ~ T3 + T8 + T14 + T20 +T27+ T28, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# reg3 <-plm(Emmissions_Score_diff ~ T3 + T8 + T14 + T20 +T27+ T28, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# 
+# reg4 <-plm(E_Innovation_Score_diff ~ T3 + T8 + T14 + T20 +T27+ T28, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# 
+# reg5 <-plm(Energy_to_revenues_diff ~ T3 + T8 + T14 + T20 +T27+ T28, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# stargazer(reg1, reg5, omit = '[i][n][d]', type='text')
+# 
+# stargazer(reg2, reg3, reg4, omit = '[i][n][d]', type='text')
+# 
+# 
+# # 
+# # ###differences in differences
+# # reg1 <-plm(CO2_to_revenues_diff ~  T3_diff + T8_diff + T14_diff + T20_diff +T27_diff, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # # res <- summary(reg)
+# # # res
+# # 
+# # reg2 <-plm(ESG_Score_diff ~ T3_diff + T8_diff + T14_diff + T20_diff +T27_diff, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # # res <- summary(reg)
+# # # res
+# # 
+# # reg3 <-plm(Emmissions_Score_diff ~ T3_diff + T8_diff + T14_diff + T20_diff +T27_diff, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # # res <- summary(reg)
+# # # res
+# # 
+# # reg4 <-plm(E_Innovation_Score_diff ~  T3_diff + T8_diff + T14_diff + T20_diff +T27_diff, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # # res <- summary(reg)
+# # # reg
+# # 
+# # reg5 <-plm(Energy_to_revenues_diff ~T3_diff + T8_diff + T14_diff + T20_diff +T27_diff, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # # res <- summary(reg)
+# # # res
+# # 
+# # stargazer(reg1, reg5, omit = '[i][n][d]', type='text')
+# # 
+# # stargazer(reg2, reg3, reg4, omit = '[i][n][d]', type='text')
+# # 
+# # library("Hmisc")
+# # library(car)
+# ###differences in differences
+# reg1 <-plm(CO2_to_revenues_diff ~ T3 + T8 + T14 + T20 +T27 + T28 + T3_diff + T8_diff + T14_diff + T20_diff +T27_diff +T28_diff, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+#   # vif(reg1)
+# 
+# reg2 <-plm(ESG_Score_diff ~ T3 + T8 + T14 + T20 +T27 + T28 + T3_diff + T8_diff + T14_diff + T20_diff +T27_diff +T28_diff, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# reg3 <-plm(Emmissions_Score_diff ~ T3 + T8 + T14 + T20 +T27 + T28 + T3_diff + T8_diff + T14_diff + T20_diff +T27_diff +T28_diff, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# reg4 <-plm(E_Innovation_Score_diff ~ T3 + T8 + T14 + T20 +T27 + T28 + T3_diff + T8_diff + T14_diff + T20_diff +T27_diff +T28_diff, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # reg
+# 
+# reg5 <-plm(Energy_to_revenues_diff ~ T3 + T8 + T14 + T20 +T27 + T28 + T3_diff + T8_diff + T14_diff + T20_diff +T27_diff +T28_diff, data=table_corr, index=c("company","Year"), model = "within", effect = "twoways")
+# # res <- summary(reg)
+# # res
+# 
+# stargazer(reg1, reg5, omit = '[i][n][d]', type='text')
+# 
+# stargazer(reg2, reg3, reg4, omit = '[i][n][d]', type='text')
+```
+
+```{r, echo=FALSE}
+
+ctrls <- c("GDPreal", "FDI", "Inflation_yoy")
+
+# make a copy of the STM data used for estimateEffect
+meta_z <- out$meta
+
+# z-score controls (mean 0, sd 1)
+meta_z[ctrls] <- lapply(meta_z[ctrls], function(x) as.numeric(scale(x)))
+
+# re-fit estimateEffect using the standardized meta
+prep_z <- estimateEffect(
+  Korder ~ GDPreal + FDI + Inflation_yoy + Tokayev,
+  ncpPrevFit_startup,
+  meta = meta_z,
+  uncertainty = "Global"
+)
+
+summary(prep_z)
+
